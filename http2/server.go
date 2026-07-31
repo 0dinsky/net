@@ -1011,7 +1011,17 @@ var writeDataPool = sync.Pool{
 func (sc *serverConn) writeDataFromHandler(stream *stream, data []byte, endStream bool) error {
 	ch := sc.srv.state.getErrChan()
 	writeArg := writeDataPool.Get().(*writeData)
-	*writeArg = writeData{stream.id, data, endStream}
+	var pad []byte
+	if sc.srv.DataPaddingMax > 0 {
+		// initialMaxFrameSize (16384) is the RFC 7540 floor for
+		// SETTINGS_MAX_FRAME_SIZE — a compliant peer can never negotiate
+		// below it — so using it here instead of sc.maxFrameSize avoids a
+		// cross-goroutine data race (sc.maxFrameSize is only safe to read
+		// from the serve loop goroutine; this runs on the handler's).
+		padLen := pickDataPaddingLen(sc.srv.DataPaddingMin, sc.srv.DataPaddingMax, len(data), initialMaxFrameSize)
+		pad = dataPadding(padLen)
+	}
+	*writeArg = writeData{stream.id, data, endStream, pad}
 	err := sc.writeFrameFromHandler(FrameWriteRequest{
 		write:  writeArg,
 		stream: stream,

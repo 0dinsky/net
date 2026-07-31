@@ -100,6 +100,10 @@ type writeData struct {
 	streamID  uint32
 	p         []byte
 	endStream bool
+	// pad holds zero-value padding bytes to send alongside p (RFC 7540
+	// §6.1 PADDED flag) — see pickDataPaddingLen/dataPadding in
+	// padding_data.go. nil (the common case) means no padding.
+	pad []byte
 }
 
 func (w *writeData) String() string {
@@ -107,11 +111,18 @@ func (w *writeData) String() string {
 }
 
 func (w *writeData) writeFrame(ctx writeContext) error {
+	if len(w.pad) > 0 {
+		return ctx.Framer().WriteDataPadded(w.streamID, w.endStream, w.p, w.pad)
+	}
 	return ctx.Framer().WriteData(w.streamID, w.endStream, w.p)
 }
 
 func (w *writeData) staysWithinBuffer(max int) bool {
-	return frameHeaderLen+len(w.p) <= max
+	extra := 0
+	if len(w.pad) > 0 {
+		extra = 1 + len(w.pad) // 1-byte pad-length field + the padding itself
+	}
+	return frameHeaderLen+len(w.p)+extra <= max
 }
 
 // handlerPanicRST is the message sent from handler goroutines when

@@ -152,6 +152,20 @@ type Transport struct {
 	// The errType consists of only ASCII word characters.
 	CountError func(errType string)
 
+	// DataPaddingMin/DataPaddingMax add random PADDED-flag padding (RFC 7540
+	// §6.1) to outgoing request-body DATA frames, chosen uniformly in
+	// [DataPaddingMin, DataPaddingMax] bytes per frame. The HTTP/2 pad-length
+	// field is one byte, so DataPaddingMax above 255 is clamped to 255.
+	// Padding never pushes a frame above the peer's MAX_FRAME_SIZE — if the
+	// chunk plus the sampled padding wouldn't fit, padding is capped to
+	// whatever room is left in that frame. Zero/zero (the default) disables
+	// padding. Only honored by the legacy (non-wrapped) Transport — see
+	// transport.go; when net/http's own HTTP/2 client is in use (Go 1.27+
+	// without the http2legacy build tag) this has no effect, since frame
+	// writing happens inside the standard library.
+	DataPaddingMin int
+	DataPaddingMax int
+
 	// Internal state, differs between wrapped and non-wrapped implementations.
 	transportInternal
 }

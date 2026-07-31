@@ -1563,7 +1563,12 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 			data := remain[:allowed]
 			remain = remain[allowed:]
 			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
-			err = cc.fr.WriteData(cs.ID, sentEnd, data)
+			if cc.t.DataPaddingMax > 0 {
+				padLen := pickDataPaddingLen(cc.t.DataPaddingMin, cc.t.DataPaddingMax, len(data), maxFrameSize)
+				err = cc.fr.WriteDataPadded(cs.ID, sentEnd, data, dataPadding(padLen))
+			} else {
+				err = cc.fr.WriteData(cs.ID, sentEnd, data)
+			}
 			if err == nil {
 				// TODO(bradfitz): this flush is for latency, not bandwidth.
 				// Most requests won't need this. Make this opt-in or
