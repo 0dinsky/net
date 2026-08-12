@@ -372,6 +372,132 @@ func TestServerInvalidHeader(t *testing.T) {
 	})
 }
 
+func TestServerAuthorityAndHostHeader(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		h        http.Header
+		valid    bool
+		wantHost string
+	}{{
+		name: "authority host mismatch",
+		h: http.Header{
+			":authority": {"example.tld"},
+			"host":       {"other.tld"},
+		},
+	}, {
+		// The RFCs aren't explicit on whether a :authority and host that
+		// differ only in case is a mismatch. We treat it as a mismatch because
+		// there doesn't seem to be a good reason not to.
+		name: "authority host case differs",
+		h: http.Header{
+			":authority": {"example.tld"},
+			"host":       {"EXAMPLE.TLD"},
+		},
+	}, {
+		name: "authority and multiple host",
+		h: http.Header{
+			":authority": {"example.tld"},
+			"host":       {"example.tld", "example.tld"},
+		},
+	}, {
+		name: "multiple host only",
+		h: http.Header{
+			"host": {"example.tld", "example.tld"},
+		},
+	}, {
+		name: "multiple authority only",
+		h: http.Header{
+			":authority": {"example.tld", "example.tld"},
+		},
+	}, {
+		name: "empty authority",
+		h: http.Header{
+			":authority": {""},
+		},
+	}, {
+		name: "invalid authority",
+		h: http.Header{
+			":authority": {"example . tld"},
+		},
+	}, {
+		name: "invalid host",
+		h: http.Header{
+			"host": {"example . tld"},
+		},
+	}, {
+		name: "authority only",
+		h: http.Header{
+			":authority": {"example.tld"},
+		},
+		valid:    true,
+		wantHost: "example.tld",
+	}, {
+		name: "host only",
+		h: http.Header{
+			"host": {"example.tld"},
+		},
+		valid:    true,
+		wantHost: "example.tld",
+	}, {
+		name: "authority host match",
+		h: http.Header{
+			":authority": {"example.tld"},
+			"host":       {"example.tld"},
+		},
+		valid:    true,
+		wantHost: "example.tld",
+	}, {
+		name: "authority host match with port",
+		h: http.Header{
+			":authority": {"example.tld:443"},
+			"host":       {"example.tld:443"},
+		},
+		valid:    true,
+		wantHost: "example.tld:443",
+	}, {
+		name: "authority host mismatch with port",
+		h: http.Header{
+			":authority": {"example.tld:80"},
+			"host":       {"example.tld:443"},
+		},
+	}, {
+		name: "userinfo in authority",
+		h: http.Header{
+			":authority": {"user:pass@example.tld"},
+		},
+	}, {
+		name: "userinfo in host",
+		h: http.Header{
+			"host": {"user:pass@example.tld"},
+		},
+	}, {
+		name:     "neither authority nor host",
+		h:        http.Header{},
+		valid:    true,
+		wantHost: "",
+	}} {
+		synctestSubtest(t, test.name, func(t *testing.T) {
+			ts := newTestServer(t, nil)
+			tc := ts.connect()
+			tc.greet()
+
+			reqStream := tc.newStream(streamTypeRequest)
+			reqStream.writeHeaders(requestHeader(test.h))
+			if test.valid {
+				call := tc.nextHandlerCall()
+				if call == nil {
+					t.Fatal("no server handler call; want one")
+				}
+				if got, want := call.req.Host, test.wantHost; got != want {
+					t.Errorf("handler got Host %q, want %q", got, want)
+				}
+			} else {
+				reqStream.wantError(quic.StreamErrorCode(errH3MessageError))
+			}
+		})
+	}
+}
+
 func TestServerInvalidStatus(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gotpanic := make(chan bool)
@@ -570,48 +696,80 @@ func TestServerHandlerStreaming(t *testing.T) {
 	})
 }
 
-func TestServerHandlerTrimsContentBody(t *testing.T) {
+func TestServerHandlerDeclaresContentLength(t *testing.T) {
 	tests := []struct {
-		name                      string
-		declaredContentLen        int
-		declaredInvalidContentLen bool
-		actualContentLen          int
-		wantTrimmed               bool
+		name             string
+		contentLen       string
+		actualContentLen int
+		wantWrittenLen   int
+		wantTrimmed      bool
+		wantCLHeader     bool
 	}{
 		{
-			name:               "declared accurate content length",
-			declaredContentLen: 100,
-			actualContentLen:   100,
+			name:             "accurate content length",
+			contentLen:       "100",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+			wantCLHeader:     true,
 		},
 		{
-			name:               "declared larger content length",
-			declaredContentLen: 100,
-			actualContentLen:   10,
+			name:             "larger content length",
+			contentLen:       "100",
+			actualContentLen: 10,
+			wantWrittenLen:   10,
+			wantCLHeader:     true,
 		},
 		{
-			name:               "declared smaller content length",
-			declaredContentLen: 10,
-			actualContentLen:   100,
-			wantTrimmed:        true,
+			name:             "smaller content length",
+			contentLen:       "10",
+			actualContentLen: 100,
+			wantWrittenLen:   10,
+			wantTrimmed:      true,
+			wantCLHeader:     true,
 		},
 		{
-			name:                      "declared invalid content length",
-			declaredInvalidContentLen: true,
-			actualContentLen:          100,
+			name:             "non-numeric string",
+			contentLen:       "intentional gibberish",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+		},
+		{
+			name:             "negative number",
+			contentLen:       "-10",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+		},
+		{
+			name:             "plus sign",
+			contentLen:       "+10",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+		},
+		{
+			name:             "empty",
+			contentLen:       "",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+		},
+		{
+			name:             "large valid content length",
+			contentLen:       "3000000000",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
+			wantCLHeader:     true,
+		},
+		{
+			name:             "content length overflowing int64",
+			contentLen:       "9223372036854775808",
+			actualContentLen: 100,
+			wantWrittenLen:   100,
 		},
 	}
 
 	for _, tt := range tests {
-		wantWrittenLen := min(tt.actualContentLen, tt.declaredContentLen)
-		if tt.declaredInvalidContentLen {
-			wantWrittenLen = tt.actualContentLen
-		}
 		synctestSubtest(t, tt.name, func(t *testing.T) {
 			ts := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Length", strconv.Itoa(tt.declaredContentLen))
-				if tt.declaredInvalidContentLen {
-					w.Header().Set("Content-Length", "not a number, should be ignored")
-				}
+				w.Header().Set("Content-Length", tt.contentLen)
 				var written int
 				var lastErr error
 				for range tt.actualContentLen {
@@ -622,8 +780,8 @@ func TestServerHandlerTrimsContentBody(t *testing.T) {
 				if tt.wantTrimmed != (lastErr != nil) {
 					t.Errorf("got %v error when writing response body, even though wantTrimmed is %v", lastErr, tt.wantTrimmed)
 				}
-				if written != wantWrittenLen {
-					t.Errorf("got %v bytes written by the server, want %v bytes", written, wantWrittenLen)
+				if written != tt.wantWrittenLen {
+					t.Errorf("got %v bytes written by the server, want %v bytes", written, tt.wantWrittenLen)
 				}
 			}))
 			tc := ts.connect()
@@ -631,8 +789,16 @@ func TestServerHandlerTrimsContentBody(t *testing.T) {
 
 			reqStream := tc.newStream(streamTypeRequest)
 			reqStream.writeHeaders(requestHeader(nil))
-			reqStream.wantHeaders(nil)
-			reqStream.wantData(slices.Repeat([]byte("a"), wantWrittenLen))
+			expectedHeaders := http.Header{
+				":status":      {"200"},
+				"Content-Type": {"text/plain; charset=utf-8"},
+				"Date":         {"Sat, 01 Jan 2000 00:00:00 GMT"}, // Synctest starting time.
+			}
+			if tt.wantCLHeader {
+				expectedHeaders.Set("Content-Length", tt.contentLen)
+			}
+			reqStream.wantHeaders(expectedHeaders)
+			reqStream.wantData(slices.Repeat([]byte("a"), tt.wantWrittenLen))
 			reqStream.wantClosed("request is complete")
 		})
 	}
